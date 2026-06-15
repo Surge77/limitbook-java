@@ -2,17 +2,22 @@ package com.limitbook.gateway.sim;
 
 import com.limitbook.engine.EngineCommand;
 import com.limitbook.engine.EngineService;
+import com.limitbook.engine.model.BookSnapshot;
 import com.limitbook.engine.model.Order;
 import com.limitbook.engine.model.Side;
+import java.util.ArrayDeque;
+import java.util.Deque;
 import java.util.Random;
 import java.util.concurrent.atomic.AtomicLong;
 import org.springframework.stereotype.Component;
 
 /**
- * Synthetic order flow: a mid price does a bounded random walk while limit orders
- * are sprayed around it (some crossing, some resting) plus occasional market
- * orders, so the book and trade tape stay lively. Drives load for stress-testing
- * and makes the UI look alive on demand.
+ * Market-making style synthetic flow. Each step reads the live best bid/ask and
+ * either (a) posts a passive maker order just inside the spread, (b) crosses by a
+ * tick as a taker to generate a trade, or (c) cancels one of its own resting
+ * orders. This keeps a tight two-sided book with bounded depth — unlike a uniform
+ * random spray, which lets takers hollow out the inside while passive orders pile
+ * up at the edges (spread blows out, sizes grow without bound).
  */
 @Component
 public class Simulator {
@@ -20,18 +25,22 @@ public class Simulator {
     private static final int MAX_RATE = 200_000;
     private static final long TICK_SLEEP_MS = 5;
     private static final int TICKS_PER_SEC = 200;
-    private static final long MID_FLOOR = 9_000;
-    private static final long MID_CEIL = 11_000;
-    private static final int PRICE_BAND = 5;
-    private static final int MARKET_ORDER_PERCENT = 5;
+    private static final long DEFAULT_MID = 10_000;
+    private static final int TAKER_PERCENT = 40;
+    private static final int CANCEL_PERCENT = 18;
+    private static final int DEPTH_LEVELS = 12;
+    private static final int TAKER_DEPTH = 2;
+    private static final int MAX_QTY = 20;
+    private static final int MAX_TRACKED_IDS = 4_000;
+    private static final int ACCOUNTS = 5;
 
     private final EngineService engine;
     private final AtomicLong idGenerator;
     private final Random random = new Random();
+    private final Deque<Long> restingIds = new ArrayDeque<>();
 
     private volatile boolean running;
     private volatile int ratePerSec;
-    private long mid = 10_000;
     private Thread thread;
 
     public Simulator(EngineService engine, AtomicLong orderIdGenerator) {
@@ -70,7 +79,7 @@ public class Simulator {
         while (running) {
             int batch = Math.max(1, ratePerSec / TICKS_PER_SEC);
             for (int i = 0; i < batch; i++) {
-                engine.offer(new EngineCommand.Submit(nextOrder()));
+                engine.offer(nextCommand());
             }
             try {
                 Thread.sleep(TICK_SLEEP_MS);
@@ -81,20 +90,68 @@ public class Simulator {
         }
     }
 
-    private Order nextOrder() {
-        mid += random.nextInt(3) - 1; // -1, 0, +1
-        mid = Math.max(MID_FLOOR, Math.min(MID_CEIL, mid));
-        long id = idGenerator.incrementAndGet();
-        Side side = random.nextBoolean() ? Side.BUY : Side.SELL;
-        long qty = 1 + random.nextInt(20);
-        if (random.nextInt(100) < MARKET_ORDER_PERCENT) {
-            return Order.market(id, randomAccount(), side, qty);
+    private EngineCommand nextCommand() {
+        if (random.nextInt(100) < CANCEL_PERCENT) {
+            Long id = pollTrackedId();
+            if (id != null) {
+                return new EngineCommand.Cancel(id);
+            }
         }
-        long price = mid + (random.nextInt(2 * PRICE_BAND + 1) - PRICE_BAND);
-        return Order.limit(id, randomAccount(), side, Math.max(1, price), qty);
+
+        BookSnapshot snap = engine.latestSnapshot();
+        long bestBid = snap.bids().isEmpty() ? -1 : snap.bids().get(0).price();
+        long bestAsk = snap.asks().isEmpty() ? -1 : snap.asks().get(0).price();
+        long id = idGenerator.incrementAndGet();
+        long account = 1 + random.nextInt(ACCOUNTS);
+        long qty = 1 + random.nextInt(MAX_QTY);
+
+        if (bestBid < 0 || bestAsk < 0) {
+            return bootstrap(id, account, qty, bestBid, bestAsk);
+        }
+
+        Side side = random.nextBoolean() ? Side.BUY : Side.SELL;
+        if (random.nextInt(100) < TAKER_PERCENT) {
+            // cross the spread: trades against resting liquidity, never tracked
+            long price = side == Side.BUY
+                    ? bestAsk + random.nextInt(TAKER_DEPTH)
+                    : Math.max(1, bestBid - random.nextInt(TAKER_DEPTH));
+            return new EngineCommand.Submit(Order.limit(id, account, side, price, qty));
+        }
+
+        // passive maker: rest at or behind the best, skewed toward the top of book
+        // (offset mostly 0 → refills the inside; occasionally deeper → builds the ladder)
+        double r = random.nextDouble();
+        int offset = (int) (r * r * DEPTH_LEVELS);
+        long price = side == Side.BUY ? Math.max(1, bestBid - offset) : bestAsk + offset;
+        track(id);
+        return new EngineCommand.Submit(Order.limit(id, account, side, price, qty));
     }
 
-    private long randomAccount() {
-        return 1 + random.nextInt(5);
+    private EngineCommand bootstrap(long id, long account, long qty, long bestBid, long bestAsk) {
+        Side side;
+        long price;
+        if (bestBid < 0 && bestAsk < 0) {
+            side = random.nextBoolean() ? Side.BUY : Side.SELL;
+            price = side == Side.BUY ? DEFAULT_MID - 1 : DEFAULT_MID + 1;
+        } else if (bestBid < 0) {
+            side = Side.BUY;
+            price = Math.max(1, bestAsk - 1);
+        } else {
+            side = Side.SELL;
+            price = bestBid + 1;
+        }
+        track(id);
+        return new EngineCommand.Submit(Order.limit(id, account, side, price, qty));
+    }
+
+    private synchronized void track(long id) {
+        restingIds.addLast(id);
+        if (restingIds.size() > MAX_TRACKED_IDS) {
+            restingIds.pollFirst();
+        }
+    }
+
+    private synchronized Long pollTrackedId() {
+        return restingIds.pollFirst();
     }
 }

@@ -34,10 +34,21 @@ export async function cancelOrder(id: number): Promise<void> {
   await fetch(`/api/orders/${id}`, { method: 'DELETE' });
 }
 
-export function startSimulator(rate: number): Promise<{ running: boolean; rate: number }> {
+export interface SimStatus {
+  running: boolean;
+  rate: number;
+}
+
+export function startSimulator(rate: number): Promise<SimStatus> {
   return postJson(`/api/sim/start?rate=${rate}`, {});
 }
 
 export function stopSimulator(): Promise<{ running: boolean }> {
   return postJson('/api/sim/stop', {});
+}
+
+export async function getSimStatus(): Promise<SimStatus> {
+  const res = await fetch('/api/sim');
+  if (!res.ok) throw new Error(`${res.status}`);
+  return res.json() as Promise<SimStatus>;
 }

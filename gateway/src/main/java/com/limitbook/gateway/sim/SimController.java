@@ -1,6 +1,7 @@
 package com.limitbook.gateway.sim;
 
 import java.util.Map;
+import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
@@ -17,6 +18,11 @@ public class SimController {
 
     public SimController(Simulator simulator) {
         this.simulator = simulator;
+    }
+
+    @GetMapping
+    public Map<String, Object> status() {
+        return Map.of("running", simulator.isRunning(), "rate", simulator.rate());
     }
 
     @PostMapping("/start")

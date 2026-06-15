@@ -3,46 +3,59 @@ import { formatQty, ticksToPrice } from '../lib/format';
 
 const DEPTH = 12;
 
-function cumulative(levels: BookLevel[]): number[] {
-  const out: number[] = [];
-  let sum = 0;
-  for (const l of levels) {
-    sum += l.quantity;
-    out.push(sum);
+interface GridRow {
+  price: number;
+  quantity: number;
+  cum: number;
+}
+
+// Build a contiguous tick grid anchored on the best price so rows hold their
+// position frame-to-frame (empty ticks render as gaps) instead of jumping.
+function buildGrid(levels: BookLevel[], side: 'bid' | 'ask'): GridRow[] {
+  if (levels.length === 0) return [];
+  const byPrice = new Map<number, number>();
+  for (const l of levels) byPrice.set(l.price, l.quantity);
+  const best = levels[0].price;
+
+  const rows: GridRow[] = [];
+  let cum = 0;
+  for (let i = 0; i < DEPTH; i++) {
+    const price = side === 'ask' ? best + i : best - i;
+    const quantity = byPrice.get(price) ?? 0;
+    cum += quantity;
+    rows.push({ price, quantity, cum });
   }
-  return out;
+  return rows;
 }
 
 interface RowProps {
-  level: BookLevel;
-  cum: number;
+  row: GridRow;
   max: number;
   side: 'bid' | 'ask';
 }
 
-function Row({ level, cum, max, side }: RowProps) {
-  const pct = Math.max(2, (cum / max) * 100);
+function Row({ row, max, side }: RowProps) {
+  const pct = max > 0 ? (row.cum / max) * 100 : 0;
   const barColor = side === 'ask' ? 'bg-red-500/15' : 'bg-green-500/15';
   const priceColor = side === 'ask' ? 'text-red-400' : 'text-green-400';
+  const empty = row.quantity === 0;
   return (
     <div className="relative grid grid-cols-3 px-3 py-[3px] text-xs tabular">
       <div className={`absolute inset-y-0 right-0 ${barColor}`} style={{ width: `${pct}%` }} />
-      <span className={`relative z-10 ${priceColor}`}>{ticksToPrice(level.price)}</span>
-      <span className="relative z-10 text-right text-slate-300">{formatQty(level.quantity)}</span>
-      <span className="relative z-10 text-right text-slate-500">{formatQty(cum)}</span>
+      <span className={`relative z-10 ${priceColor}`}>{ticksToPrice(row.price)}</span>
+      <span className="relative z-10 text-right text-slate-300">{empty ? '·' : formatQty(row.quantity)}</span>
+      <span className="relative z-10 text-right text-slate-500">{empty ? '' : formatQty(row.cum)}</span>
     </div>
   );
 }
 
 export function OrderBook({ book }: { book: BookSnapshot }) {
-  const asks = book.asks.slice(0, DEPTH);
-  const bids = book.bids.slice(0, DEPTH);
-  const askCum = cumulative(asks);
-  const bidCum = cumulative(bids);
-  const max = Math.max(1, ...askCum, ...bidCum);
+  const asks = buildGrid(book.asks, 'ask');
+  const bids = buildGrid(book.bids, 'bid');
+  const max = Math.max(1, asks.at(-1)?.cum ?? 0, bids.at(-1)?.cum ?? 0);
 
-  const bestBid = bids[0]?.price ?? -1;
-  const bestAsk = asks[0]?.price ?? -1;
+  const bestBid = book.bids[0]?.price ?? -1;
+  const bestAsk = book.asks[0]?.price ?? -1;
   const spread = bestBid > 0 && bestAsk > 0 ? bestAsk - bestBid : -1;
 
   return (
@@ -54,12 +67,9 @@ export function OrderBook({ book }: { book: BookSnapshot }) {
       </div>
 
       <div className="flex flex-1 flex-col justify-end overflow-hidden">
-        {asks
-          .map((l, i) => ({ l, cum: askCum[i] }))
-          .reverse()
-          .map(({ l, cum }) => (
-            <Row key={`a-${l.price}`} level={l} cum={cum} max={max} side="ask" />
-          ))}
+        {[...asks].reverse().map((row) => (
+          <Row key={`a-${row.price}`} row={row} max={max} side="ask" />
+        ))}
       </div>
 
       <div className="flex items-center justify-between border-y border-slate-800 bg-slate-900/50 px-3 py-1.5 text-xs">
@@ -69,8 +79,8 @@ export function OrderBook({ book }: { book: BookSnapshot }) {
       </div>
 
       <div className="flex flex-1 flex-col overflow-hidden">
-        {bids.map((l, i) => (
-          <Row key={`b-${l.price}`} level={l} cum={bidCum[i]} max={max} side="bid" />
+        {bids.map((row) => (
+          <Row key={`b-${row.price}`} row={row} max={max} side="bid" />
         ))}
       </div>
     </div>
