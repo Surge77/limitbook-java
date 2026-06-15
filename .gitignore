@@ -36,3 +36,6 @@ Thumbs.db
 # Tooling artifacts
 .playwright-mcp/
 engine-core/cp.txt
+
+# crash dumps
+*.stackdump
