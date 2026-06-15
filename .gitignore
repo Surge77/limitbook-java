@@ -32,3 +32,7 @@ Thumbs.db
 *.log
 .env
 .env.*
+
+# Tooling artifacts
+.playwright-mcp/
+engine-core/cp.txt

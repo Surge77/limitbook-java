@@ -1,0 +1,19 @@
+services:
+  gateway:
+    build:
+      context: .
+      dockerfile: gateway/Dockerfile
+    environment:
+      # behind nginx the browser Origin is the published frontend host
+      - LIMITBOOK_CORS_ALLOWEDORIGINS=*
+    ports:
+      - "8080:8080"
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    depends_on:
+      - gateway
+    ports:
+      - "8088:80"
